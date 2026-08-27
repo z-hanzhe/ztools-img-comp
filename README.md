@@ -2,7 +2,7 @@
 
 适用于 ZTools 的本地图片压缩插件，离线压缩不依赖任何网络服务，页面设计借鉴 uTools 图片压缩
 
-![软件界面](https://raw.githubusercontent.com/z-hanzhe/ztools-img-comp/refs/heads/master/assets/demo.png)
+![软件界面](https://raw.githubusercontent.com/z-hanzhe/ztools-img-comp/refs/heads/main/assets/demo.png)
 
 ## 支持格式
 
