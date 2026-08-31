@@ -4,13 +4,20 @@ const fs = require('node:fs');
 const fsp = require('node:fs/promises');
 const os = require('node:os');
 const path = require('node:path');
-const { compressByName } = require('./compression-engine');
+const { fork } = require('node:child_process');
+const { Worker } = require('node:worker_threads');
+const { compressImage } = require('./compression-worker');
+const PLUGIN_VERSION = require('./plugin.json').version;
 
 const WORKSPACE = path.join(os.tmpdir(), 'ztools.image.compression');
+const DEBUG_LOG_PATH = path.join(WORKSPACE, 'compression-debug.log');
 const HISTORY_KEY = 'history-v3';
 const HISTORY_LIMIT = 8;
 const STALE_AFTER = 24 * 60 * 60 * 1000;
 const SUPPORTED_EXTENSIONS = new Set(['.jpg', '.jpeg', '.png', '.gif', '.svg']);
+const COMPRESSION_WORKER_PATH = path.join(__dirname, 'compression-worker.js');
+const MAX_COMPRESSION_EXECUTORS = 4;
+const ACTIVE_COMPRESSION_EXECUTORS = new WeakMap();
 
 /**
  * 创建唯一的批次标识。
@@ -19,6 +26,57 @@ const SUPPORTED_EXTENSIONS = new Set(['.jpg', '.jpeg', '.png', '.gif', '.svg']);
  */
 function makeId(prefix) {
   return `${prefix}-${Date.now()}-${Math.random().toString(36).slice(2, 10)}`;
+}
+
+/**
+ * 将一条压缩诊断信息追加到临时日志。
+ * @param {string} event 事件名称
+ * @param {object} details 事件详情
+ * @returns {Promise<void>} 完成信号
+ */
+async function appendCompressionDebugLog(event, details = {}) {
+  const record = {
+    time: new Date().toISOString(),
+    event,
+    ...details
+  };
+  try {
+    await fsp.mkdir(WORKSPACE, { recursive: true });
+    await fsp.appendFile(DEBUG_LOG_PATH, `${JSON.stringify(record)}\n`, 'utf8');
+  } catch (error) {
+    console.error('[img-comp] 写入压缩诊断日志失败:', error);
+  }
+}
+
+/**
+ * 重置压缩诊断日志，并记录当前宿主与批次信息。
+ * @param {object} batch 批次
+ * @returns {Promise<void>} 完成信号
+ */
+async function resetCompressionDebugLog(batch) {
+  const record = {
+    time: new Date().toISOString(),
+    event: '批次开始',
+    pluginVersion: PLUGIN_VERSION,
+    batchId: batch.id,
+    pid: process.pid,
+    platform: process.platform,
+    arch: process.arch,
+    node: process.versions.node,
+    electron: process.versions.electron || null,
+    chrome: process.versions.chrome || null,
+    availableParallelism: typeof os.availableParallelism === 'function'
+      ? os.availableParallelism()
+      : os.cpus().length,
+    entryCount: batch.entries.length,
+    inputBytes: batch.entries.reduce((total, entry) => total + (Number(entry.inputBytes) || 0), 0)
+  };
+  try {
+    await fsp.mkdir(WORKSPACE, { recursive: true });
+    await fsp.writeFile(DEBUG_LOG_PATH, `${JSON.stringify(record)}\n`, 'utf8');
+  } catch (error) {
+    console.error('[img-comp] 重置压缩诊断日志失败:', error);
+  }
 }
 
 /**
@@ -345,6 +403,354 @@ function resultPathFor(batch, entry) {
 }
 
 /**
+ * 根据机器并行度和任务数量计算并行执行器数量。
+ * @param {object[]} entries 待处理图片
+ * @returns {number} 并行执行器数量
+ */
+function compressionExecutorCount(entries) {
+  if (entries.length === 0) return 0;
+  const parallelism = typeof os.availableParallelism === 'function'
+    ? os.availableParallelism()
+    : os.cpus().length;
+  const largestInputBytes = entries.reduce((largest, entry) => {
+    return Math.max(largest, Number(entry.inputBytes) || 0);
+  }, 0);
+  const sizeLimit = largestInputBytes >= 32 * 1024 * 1024
+    ? 2
+    : largestInputBytes >= 16 * 1024 * 1024 ? 3 : MAX_COMPRESSION_EXECUTORS;
+  return Math.min(entries.length, sizeLimit, Math.max(1, parallelism - 1));
+}
+
+/**
+ * 将线程或子进程通道包装成串行压缩执行器。
+ * @param {number} executorId 执行器编号
+ * @param {string} mode 执行器类型
+ * @param {import('node:events').EventEmitter} channel 消息通道
+ * @param {(task:object)=>void} sendTask 发送任务函数
+ * @param {()=>unknown} stopChannel 停止通道函数
+ * @returns {{id:number,mode:string,run:(task:object)=>Promise<object>,close:()=>Promise<unknown>}} 压缩执行器
+ */
+function createCompressionClient(executorId, mode, channel, sendTask, stopChannel) {
+  let pending = null;
+  let failure = null;
+  let closed = false;
+  let closePromise = null;
+
+  /**
+   * 拒绝当前等待中的任务。
+   * @param {Error} error 失败原因
+   */
+  function rejectPending(error) {
+    if (!pending) return;
+    const current = pending;
+    pending = null;
+    current.reject(error);
+  }
+
+  channel.on('message', message => {
+    if (!pending || !message || message.id !== pending.id) return;
+    const current = pending;
+    pending = null;
+    current.resolve(message);
+  });
+  channel.on('error', error => {
+    failure = error;
+    void appendCompressionDebugLog('压缩执行器异常', {
+      executorId,
+      mode,
+      error: error && error.stack ? error.stack : String(error)
+    });
+    rejectPending(error);
+  });
+  channel.on('exit', (code, signal) => {
+    void appendCompressionDebugLog('压缩执行器退出', {
+      executorId,
+      mode,
+      code,
+      signal,
+      expected: closed
+    });
+    if (closed) return;
+    failure = failure || new Error(`压缩执行器意外退出，代码 ${code}，信号 ${signal || '无'}`);
+    rejectPending(failure);
+  });
+
+  /**
+   * 在执行器中运行一个压缩任务。
+   * @param {object} task 压缩任务
+   * @returns {Promise<object>} 执行器响应
+   */
+  function run(task) {
+    if (closed) return Promise.reject(new Error('压缩执行器已停止'));
+    if (failure) return Promise.reject(failure);
+    if (pending) return Promise.reject(new Error('压缩执行器仍有任务未完成'));
+    return new Promise((resolve, reject) => {
+      pending = { id: task.id, resolve, reject };
+      try {
+        sendTask(task);
+      } catch (error) {
+        pending = null;
+        reject(error);
+      }
+    });
+  }
+
+  /**
+   * 停止压缩执行器。
+   * @returns {Promise<unknown>} 停止信号
+   */
+  function close() {
+    if (closePromise) return closePromise;
+    closed = true;
+    rejectPending(new Error('压缩执行器已停止'));
+    closePromise = Promise.resolve().then(stopChannel).catch(() => undefined);
+    return closePromise;
+  }
+
+  return { id: executorId, mode, run, close };
+}
+
+/**
+ * 创建一个工作线程压缩执行器。
+ * @param {number} executorId 执行器编号
+ * @returns {{id:number,mode:string,run:(task:object)=>Promise<object>,close:()=>Promise<unknown>}} 压缩执行器
+ */
+function createCompressionWorkerClient(executorId) {
+  const worker = new Worker(COMPRESSION_WORKER_PATH);
+  const client = createCompressionClient(
+    executorId,
+    'worker-thread',
+    worker,
+    task => worker.postMessage(task),
+    () => worker.terminate()
+  );
+  worker.on('online', () => {
+    void appendCompressionDebugLog('工作线程上线', { executorId });
+  });
+  return client;
+}
+
+/**
+ * 创建一个独立 Node 子进程压缩执行器。
+ * @param {number} executorId 执行器编号
+ * @returns {{id:number,mode:string,run:(task:object)=>Promise<object>,close:()=>Promise<unknown>}} 压缩执行器
+ */
+function createCompressionProcessClient(executorId) {
+  const child = fork(COMPRESSION_WORKER_PATH, [], {
+    env: { ...process.env, ELECTRON_RUN_AS_NODE: '1' },
+    execArgv: [],
+    stdio: ['ignore', 'ignore', 'ignore', 'ipc'],
+    windowsHide: true
+  });
+  const client = createCompressionClient(
+    executorId,
+    'child-process',
+    child,
+    task => child.send(task),
+    () => child.kill()
+  );
+  child.on('spawn', () => {
+    void appendCompressionDebugLog('压缩子进程启动', {
+      executorId,
+      processId: child.pid
+    });
+  });
+  return client;
+}
+
+/**
+ * 将单项处理结果写回批次，并更新进度。
+ * @param {object} batch 批次
+ * @param {object} entry 输入项
+ * @param {object} response 压缩响应
+ * @param {(batch:object)=>void} onChange 状态回调
+ */
+function completeEntry(batch, entry, response, onChange) {
+  if (response && response.ok) {
+    entry.resultPath = response.result.resultPath;
+    entry.resultBytes = response.result.resultBytes;
+    entry.savedPercent = response.result.savedPercent;
+    batch.progress.succeeded += 1;
+  } else {
+    entry.error = response && response.error ? response.error : '处理失败';
+    batch.progress.failed += 1;
+  }
+  batch.progress.completed += 1;
+  batch.progress.percent = batch.progress.total
+    ? Math.round(batch.progress.completed * 100 / batch.progress.total)
+    : 100;
+  emitChange(batch, onChange);
+}
+
+/**
+ * 在共享主线程队列中串行执行兼容回退任务。
+ * @param {{fallbackTail:Promise<void>}} state 共享任务状态
+ * @param {object} batch 批次
+ * @param {object} task 压缩任务
+ * @returns {Promise<object|null>} 压缩响应
+ */
+function runCompressionFallback(state, batch, task) {
+  const response = state.fallbackTail.then(async () => {
+    if (batch.cancelled) return null;
+    try {
+      return { id: task.id, ok: true, result: await compressImage(task) };
+    } catch (error) {
+      return {
+        id: task.id,
+        ok: false,
+        error: error && error.message ? error.message : '处理失败'
+      };
+    }
+  });
+  state.fallbackTail = response.then(() => undefined);
+  return response;
+}
+
+/**
+ * 持续从共享下标领取任务，并在一个压缩执行器中串行执行。
+ * @param {object} batch 批次
+ * @param {{nextIndex:number,entries:object[],fallbackTail:Promise<void>}} state 共享任务状态
+ * @param {{id:number,mode:string,run:(task:object)=>Promise<object>,close:()=>Promise<unknown>}|null} client 压缩执行器
+ * @param {(batch:object)=>void} onChange 状态回调
+ * @returns {Promise<void>} 完成信号
+ */
+async function runCompressionLane(batch, state, client, onChange) {
+  let executorAvailable = !!client;
+  while (!batch.cancelled) {
+    const index = state.nextIndex++;
+    if (index >= state.entries.length) return;
+    const entry = state.entries[index];
+    const task = {
+      id: makeId('task'),
+      inputPath: entry.inputPath,
+      filename: entry.filename,
+      resultPath: resultPathFor(batch, entry)
+    };
+    const executorId = client ? client.id : 0;
+    const executorMode = client ? client.mode : 'main-thread';
+    const dispatchedAt = Date.now();
+    await appendCompressionDebugLog('任务派发', {
+      batchId: batch.id,
+      taskId: task.id,
+      executorId,
+      executorMode,
+      filename: entry.filename,
+      inputBytes: entry.inputBytes
+    });
+    let response = null;
+
+    if (executorAvailable) {
+      try {
+        response = await client.run(task);
+      } catch (error) {
+        if (batch.cancelled) return;
+        executorAvailable = false;
+        await client.close();
+        await appendCompressionDebugLog('任务回退到主线程', {
+          batchId: batch.id,
+          taskId: task.id,
+          executorId,
+          executorMode,
+          filename: entry.filename,
+          error: error && error.stack ? error.stack : String(error)
+        });
+        console.error('[img-comp] 并行压缩执行器不可用，已回退到主线程:', error);
+      }
+    }
+
+    if (!executorAvailable && !response) {
+      if (batch.cancelled) return;
+      response = await runCompressionFallback(state, batch, task);
+      if (!response) return;
+    }
+    await appendCompressionDebugLog('任务完成', {
+      batchId: batch.id,
+      taskId: task.id,
+      executorId,
+      executorMode: response.executorMode || executorMode,
+      threadId: response.threadId || 0,
+      processId: response.processId || process.pid,
+      filename: entry.filename,
+      success: !!response.ok,
+      elapsedMs: Date.now() - dispatchedAt,
+      executorDurationMs: response.durationMs || null,
+      error: response.ok ? null : response.error
+    });
+    completeEntry(batch, entry, response, onChange);
+  }
+}
+
+/**
+ * 使用受控并行执行器池处理批次中的压缩任务。
+ * 优先使用工作线程，宿主禁用线程时改用独立 Node 子进程。
+ * @param {object} batch 批次
+ * @param {(batch:object)=>void} onChange 状态回调
+ * @returns {Promise<void>} 完成信号
+ */
+async function executeCompressionPool(batch, onChange) {
+  const executorCount = compressionExecutorCount(batch.entries);
+  await appendCompressionDebugLog('执行器池配置', {
+    batchId: batch.id,
+    requestedExecutors: executorCount,
+    maxInputBytes: batch.entries.reduce((largest, entry) => {
+      return Math.max(largest, Number(entry.inputBytes) || 0);
+    }, 0)
+  });
+  const clients = [];
+  let preferredMode = 'worker-thread';
+  for (let index = 0; index < executorCount; index++) {
+    const executorId = index + 1;
+    let client = null;
+    if (preferredMode === 'worker-thread') {
+      try {
+        client = createCompressionWorkerClient(executorId);
+      } catch (error) {
+        preferredMode = 'child-process';
+        await appendCompressionDebugLog('创建工作线程失败，改用子进程', {
+          batchId: batch.id,
+          executorId,
+          error: error && error.stack ? error.stack : String(error)
+        });
+      }
+    }
+    if (!client) {
+      try {
+        client = createCompressionProcessClient(executorId);
+      } catch (error) {
+        await appendCompressionDebugLog('创建压缩子进程失败', {
+          batchId: batch.id,
+          executorId,
+          error: error && error.stack ? error.stack : String(error)
+        });
+        console.error('[img-comp] 创建压缩子进程失败，将使用已有执行器或主线程:', error);
+        break;
+      }
+    }
+    clients.push(client);
+  }
+  await appendCompressionDebugLog('执行器池已创建', {
+    batchId: batch.id,
+    activeExecutors: clients.length,
+    modes: clients.map(client => client.mode)
+  });
+
+  const lanes = clients.length > 0 ? clients : [null];
+  const state = {
+    nextIndex: 0,
+    entries: batch.entries,
+    fallbackTail: Promise.resolve()
+  };
+  ACTIVE_COMPRESSION_EXECUTORS.set(batch, clients);
+  try {
+    await Promise.all(lanes.map(client => runCompressionLane(batch, state, client, onChange)));
+  } finally {
+    ACTIVE_COMPRESSION_EXECUTORS.delete(batch);
+    await Promise.allSettled(clients.map(client => client.close()));
+    await appendCompressionDebugLog('执行器池结束', { batchId: batch.id });
+  }
+}
+
+/**
  * 执行批次中的所有图片。
  * @param {object} batch 批次
  * @param {(batch:object)=>void} onChange 状态回调
@@ -352,36 +758,11 @@ function resultPathFor(batch, entry) {
  */
 async function executeBatch(batch, onChange) {
   if (!batch || !Array.isArray(batch.entries)) throw new Error('批次数据无效');
+  const startedAt = Date.now();
+  await resetCompressionDebugLog(batch);
   batch.phase = 'running';
   emitChange(batch, onChange);
-  for (const entry of batch.entries) {
-    if (batch.cancelled) break;
-    try {
-      if (!entry.inputBytes) throw new Error('文件内容为空');
-      const original = await fsp.readFile(entry.inputPath);
-      const compressed = await compressByName(entry.filename, original);
-      if (compressed.length >= original.length) {
-        entry.resultPath = entry.inputPath;
-        entry.resultBytes = original.length;
-        entry.savedPercent = 0;
-      } else {
-        entry.resultPath = resultPathFor(batch, entry);
-        entry.resultBytes = compressed.length;
-        entry.savedPercent = Number((100 * (1 - compressed.length / original.length)).toFixed(1));
-        await fsp.mkdir(path.dirname(entry.resultPath), { recursive: true });
-        await fsp.writeFile(entry.resultPath, compressed);
-      }
-      batch.progress.succeeded += 1;
-    } catch (error) {
-      entry.error = error && error.message ? error.message : '处理失败';
-      batch.progress.failed += 1;
-    }
-    batch.progress.completed += 1;
-    batch.progress.percent = batch.progress.total
-      ? Math.round(batch.progress.completed * 100 / batch.progress.total)
-      : 100;
-    emitChange(batch, onChange);
-  }
+  await executeCompressionPool(batch, onChange);
   if (batch.cancelled) {
     for (const entry of batch.entries) {
       if (!entry.resultPath && !entry.error) entry.error = '已取消';
@@ -390,6 +771,14 @@ async function executeBatch(batch, onChange) {
   } else {
     batch.phase = 'complete';
   }
+  await appendCompressionDebugLog('批次结束', {
+    batchId: batch.id,
+    phase: batch.phase,
+    elapsedMs: Date.now() - startedAt,
+    completed: batch.progress.completed,
+    succeeded: batch.progress.succeeded,
+    failed: batch.progress.failed
+  });
   emitChange(batch, onChange);
   return batch;
 }
@@ -409,7 +798,12 @@ function emitChange(batch, callback) {
  * @returns {object} 更新后的批次
  */
 function cancelBatch(batch) {
-  if (batch) batch.cancelled = true;
+  if (batch) {
+    batch.cancelled = true;
+    void appendCompressionDebugLog('收到取消请求', { batchId: batch.id });
+    const clients = ACTIVE_COMPRESSION_EXECUTORS.get(batch) || [];
+    for (const client of clients) void client.close();
+  }
   return batch;
 }
 

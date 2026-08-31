@@ -19,6 +19,7 @@ const SOURCE_FILES = [
   'index.js',
   'preload.js',
   'runtime-service.js',
+  'compression-worker.js',
   'compression-engine.js',
   'assets/logo.png',
   'package.json',

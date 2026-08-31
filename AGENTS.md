@@ -16,9 +16,10 @@ ZTools 本地图片压缩插件，支持 JPG、PNG、GIF、SVG，基于 JavaScri
 调整目录结构或模块职责时，必须同步更新本节：
 
 1. `compression-engine.js` 仅负责格式识别和 JPEG、PNG、GIF、SVG 编解码。
-2. `runtime-service.js` 负责批次生命周期、文件扫描、临时结果、历史记录和剪贴板。
-3. `preload.js` 只建立一个只读的 `imgCompRuntime` 浏览器桥接对象。
-4. `index.js` 只负责渲染和用户交互，不直接访问 Node.js 文件系统。
+2. `compression-worker.js` 负责在线程或独立 Node 子进程中读取、压缩并写入单张图片。
+3. `runtime-service.js` 负责并行执行器池、批次生命周期、文件扫描、临时结果、历史记录和剪贴板。
+4. `preload.js` 只建立一个只读的 `imgCompRuntime` 浏览器桥接对象。
+5. `index.js` 只负责渲染和用户交互，不直接访问 Node.js 文件系统。
 
 红线：`index.js` 不得引入 Node API；`preload.js` 不得添加业务逻辑；新增源文件必须同步加入 `build-zpx.js` 的 `SOURCE_FILES` 白名单，否则不会进入发布包。
 

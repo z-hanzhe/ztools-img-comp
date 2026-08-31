@@ -8,8 +8,9 @@ const assert = require('node:assert/strict');
 
 /**
  * 加载运行时服务并提供最小 ZTools 宿主桩。
+ * @param {{disableWorkers?:boolean}} options 加载选项
  */
-function loadRuntime() {
+function loadRuntime(options = {}) {
   const storage = new Map();
   const copiedFiles = [];
   global.window = {
@@ -28,8 +29,20 @@ function loadRuntime() {
       }
     }
   };
+  const workerThreads = require('node:worker_threads');
+  const OriginalWorker = workerThreads.Worker;
+  if (options.disableWorkers) {
+    /** 模拟 ZTools 宿主禁用工作线程。 */
+    workerThreads.Worker = function DisabledWorker() {
+      throw new Error('当前 V8 平台不支持创建工作线程');
+    };
+  }
   delete require.cache[require.resolve('../runtime-service')];
-  return { service: require('../runtime-service'), copiedFiles, storage };
+  try {
+    return { service: require('../runtime-service'), copiedFiles, storage };
+  } finally {
+    workerThreads.Worker = OriginalWorker;
+  }
 }
 
 test('目录输入只创建一个批次并收集全部图片', async () => {
@@ -89,6 +102,55 @@ test('不同目录的同名文件使用不同结果路径且可分别覆盖', as
   assert.equal(await service.replaceInputs(batch), true);
   assert.match(fs.readFileSync(first, 'utf8'), /fill="red"/);
   assert.match(fs.readFileSync(second, 'utf8'), /fill="#00f"/);
+  fs.rmSync(root, { recursive: true, force: true });
+});
+
+test('单张图片失败不会中断同批其他压缩任务', async () => {
+  const { service } = loadRuntime();
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), 'img-comp-isolation-'));
+  const validPath = path.join(root, 'valid.svg');
+  const invalidPath = path.join(root, 'invalid.png');
+  fs.writeFileSync(validPath, '<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 10 10"><!-- comment --><rect width="10" height="10" fill="#ff0000"/></svg>');
+  fs.writeFileSync(invalidPath, 'not-a-png');
+  const batch = await service.createBatch({ kind: 'files', payload: [
+    { path: validPath, name: 'valid.svg', isFile: true },
+    { path: invalidPath, name: 'invalid.png', isFile: true }
+  ] });
+
+  await service.executeBatch(batch);
+
+  assert.equal(batch.phase, 'complete');
+  assert.equal(batch.progress.succeeded, 1);
+  assert.equal(batch.progress.failed, 1);
+  assert.equal(batch.progress.completed, 2);
+  assert.equal(batch.progress.percent, 100);
+  assert.ok(batch.entries.find(entry => entry.filename === 'valid.svg').resultPath);
+  assert.ok(batch.entries.find(entry => entry.filename === 'invalid.png').error);
+  fs.rmSync(root, { recursive: true, force: true });
+});
+
+test('工作线程被宿主禁用时会改用多个压缩子进程', async () => {
+  const { service } = loadRuntime({ disableWorkers: true });
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), 'img-comp-process-pool-'));
+  const payload = Array.from({ length: 4 }, (_, index) => {
+    const filePath = path.join(root, `${index}.svg`);
+    fs.writeFileSync(filePath, `<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 100 100"><!-- ${index} --><rect width="100" height="100" fill="#ff0000"/></svg>`);
+    return { path: filePath, name: `${index}.svg`, isFile: true };
+  });
+  const batch = await service.createBatch({ kind: 'files', payload });
+
+  await service.executeBatch(batch);
+
+  const logPath = path.join(os.tmpdir(), 'ztools.image.compression', 'compression-debug.log');
+  const records = fs.readFileSync(logPath, 'utf8').trim().split('\n').map(line => JSON.parse(line));
+  const poolRecord = records.find(record => record.event === '执行器池已创建');
+  const completed = records.filter(record => record.event === '任务完成');
+  assert.deepEqual(poolRecord.modes, [
+    'child-process', 'child-process', 'child-process', 'child-process'
+  ]);
+  assert.equal(new Set(completed.map(record => record.processId)).size, 4);
+  assert.equal(batch.progress.succeeded, 4);
+  assert.equal(batch.progress.failed, 0);
   fs.rmSync(root, { recursive: true, force: true });
 });
 
