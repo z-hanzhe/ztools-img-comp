@@ -27,8 +27,10 @@
 
 ## 安装
 
-将 `img-comp.zpx` 拖入 ZTools 的插件安装入口即可，或直接在 ZTools 插件市场搜索“图片压缩”安装。
+将 `dist/img-comp.zpx` 拖入 ZTools 的插件安装入口即可，或直接在 ZTools 插件市场搜索“图片压缩”安装。
+
+执行 `npm run build` 后，`dist/` 是可直接导入的完整插件目录；官方插件仓库的 Action 会从该目录内容生成 ZIP 安装包。
 
 ## 许可证
 
-本项目自身代码采用 MIT License。运行时依赖及其 WASM 编解码器继续采用各自的上游许可证，完整文本见 [THIRD_PARTY_NOTICES.md](THIRD_PARTY_NOTICES.md)。
+本项目自身代码采用 MIT License。运行时依赖及其 WASM 编解码器继续采用各自的上游许可证，构建时会随运行时依赖一并分发其原始许可证文件和许可证元数据。

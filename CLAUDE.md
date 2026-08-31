@@ -7,8 +7,7 @@ ZTools 本地图片压缩插件，支持 JPG、PNG、GIF、SVG，基于 JavaScri
 | 命令 | 说明 |
 | --- | --- |
 | `npm test` | 运行全部测试（Node 内置 test runner，`test/*.test.cjs`） |
-| `npm run notices` | 重新生成第三方许可证清单 |
-| `npm run build` | 构建发布包 `dist/img-comp.zpx`（会先自动生成许可证清单） |
+| `npm run build` | 构建发布包 `dist/img-comp.zpx` |
 
 环境要求 Node.js >= 22.12。
 
@@ -48,8 +47,7 @@ batch
 ## 发布边界
 
 - `build-zpx.js` 采用源码白名单，并经 `release-deps.js` 从 `package.json` 解析运行时依赖闭包；测试、开发依赖、源码映射不会进入 `.zpx`。
-- `THIRD_PARTY_NOTICES.md` 由 `generate-notices.js` 自动生成，禁止手工修改；依赖版本变化后必须重新执行 `npm run notices`。
-- 项目自身代码采用 MIT 许可证，依赖保持各自上游许可证。
+- 构建会将运行时依赖目录及其中的许可证文件、许可证元数据复制到发布包；项目自身代码采用 MIT 许可证，依赖保持各自上游许可证。
 
 ## 文档维护
 

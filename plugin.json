@@ -51,7 +51,7 @@
               "Finder.app",
               "explorer.exe"
             ],
-            "className": [
+            "class": [
               "",
               "CabinetWClass"
             ]

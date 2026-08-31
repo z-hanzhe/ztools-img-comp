@@ -1,17 +1,16 @@
-// 构建脚本：生成许可证清单，筛选运行时依赖，打包为 ZTools 可安装的 .zpx
+// 构建脚本：生成完整插件目录，并生成可安装的 Brotli ZPX
 'use strict';
 
 const fs = require('node:fs');
 const fsp = require('node:fs/promises');
 const path = require('node:path');
-const cp = require('node:child_process');
 const zlib = require('node:zlib');
 const asar = require('@electron/asar');
 const { collectRuntimePackages, ROOT } = require('./release-deps');
 
 const DIST = path.join(ROOT, 'dist');
-const STAGE = path.join(DIST, '_stage');
-const ASAR = path.join(DIST, 'img-comp.asar');
+const STAGE = path.join(ROOT, '.zpx-stage');
+const ASAR = path.join(ROOT, '.img-comp.asar');
 const ZPX = path.join(DIST, 'img-comp.zpx');
 const SOURCE_FILES = [
   'plugin.json',
@@ -24,8 +23,7 @@ const SOURCE_FILES = [
   'assets/logo.png',
   'package.json',
   'README.md',
-  'LICENSE',
-  'THIRD_PARTY_NOTICES.md'
+  'LICENSE'
 ];
 const OMIT_DIRS = new Set([
   '.git', '.github', '.circleci', 'test', 'tests', 'demo', 'examples',
@@ -58,11 +56,11 @@ function copyRuntimeTree(source, target) {
  * 清理并创建构建暂存目录。
  */
 function resetDirectories() {
-  fs.mkdirSync(DIST, { recursive: true });
-  for (const file of [ASAR, ZPX]) {
+  fs.rmSync(DIST, { recursive: true, force: true });
+  fs.rmSync(STAGE, { recursive: true, force: true });
+  for (const file of [ASAR]) {
     try { fs.unlinkSync(file); } catch {}
   }
-  fs.rmSync(STAGE, { recursive: true, force: true });
   fs.mkdirSync(STAGE, { recursive: true });
 }
 
@@ -91,7 +89,6 @@ function stageRuntimeDependencies() {
  * 构建并压缩 ZTools 插件包。
  */
 async function main() {
-  cp.execFileSync(process.execPath, [path.join(ROOT, 'generate-notices.js')], { stdio: 'inherit' });
   resetDirectories();
   stageSourceFiles();
   stageRuntimeDependencies();
@@ -99,20 +96,27 @@ async function main() {
   console.log('[build] asar pack ->', ASAR);
   await asar.createPackage(STAGE, ASAR);
 
-  console.log('[build] gzip ->', ZPX);
-  const archive = await fsp.readFile(ASAR);
-  await fsp.writeFile(ZPX, zlib.gzipSync(archive, { level: 9 }));
-  fs.rmSync(STAGE, { recursive: true, force: true });
+  // dist 本身就是官方 Action 后续需要打 ZIP 的完整插件目录。
+  fs.cpSync(STAGE, DIST, { recursive: true });
+  console.log('[build] plugin dir ->', DIST);
 
-  for (const file of [ASAR, ZPX]) {
-    const size = fs.statSync(file).size;
-    console.log('  ', file, '-', (size / 1024 / 1024).toFixed(2), 'MB');
-  }
+  console.log('[build] brotli ->', ZPX);
+  const archive = await fsp.readFile(ASAR);
+  const compressed = zlib.brotliCompressSync(archive, {
+    params: { [zlib.constants.BROTLI_PARAM_QUALITY]: 5 }
+  });
+  await fsp.writeFile(ZPX, compressed);
+  fs.rmSync(STAGE, { recursive: true, force: true });
+  fs.rmSync(ASAR, { force: true });
+
+  const size = fs.statSync(ZPX).size;
+  console.log('  ', ZPX, '-', (size / 1024 / 1024).toFixed(2), 'MB');
   console.log('[build] OK');
 }
 
 main().catch(error => {
   console.error('BUILD FAILED:', error);
   try { fs.rmSync(STAGE, { recursive: true, force: true }); } catch {}
+  try { fs.rmSync(ASAR, { force: true }); } catch {}
   process.exit(1);
 });

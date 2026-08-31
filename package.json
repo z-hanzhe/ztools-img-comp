@@ -8,10 +8,9 @@
   "author": "img-comp contributors",
   "license": "MIT",
   "engines": {
-    "node": ">=22.12.0"
+    "node": ">=20.0.0"
   },
   "scripts": {
-    "notices": "node generate-notices.js",
     "test": "node --test test/*.test.cjs",
     "build": "node build-zpx.js"
   },
