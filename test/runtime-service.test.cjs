@@ -6,6 +6,8 @@ const path = require('node:path');
 const test = require('node:test');
 const assert = require('node:assert/strict');
 
+const SERVICE_PATH = path.join(__dirname, '..', 'public', 'preload', 'runtime-service.js');
+
 /**
  * 加载运行时服务并提供最小 ZTools 宿主桩。
  * @param {{disableWorkers?:boolean}} options 加载选项
@@ -37,9 +39,9 @@ function loadRuntime(options = {}) {
       throw new Error('当前 V8 平台不支持创建工作线程');
     };
   }
-  delete require.cache[require.resolve('../runtime-service')];
+  delete require.cache[require.resolve(SERVICE_PATH)];
   try {
-    return { service: require('../runtime-service'), copiedFiles, storage };
+    return { service: require(SERVICE_PATH), copiedFiles, storage };
   } finally {
     workerThreads.Worker = OriginalWorker;
   }

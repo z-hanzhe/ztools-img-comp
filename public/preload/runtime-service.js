@@ -7,7 +7,7 @@ const path = require('node:path');
 const { fork } = require('node:child_process');
 const { Worker } = require('node:worker_threads');
 const { compressImage } = require('./compression-worker');
-const PLUGIN_VERSION = require('./plugin.json').version;
+const PLUGIN_VERSION = require('../plugin.json').version;
 
 const WORKSPACE = path.join(os.tmpdir(), 'ztools.image.compression');
 const DEBUG_LOG_PATH = path.join(WORKSPACE, 'compression-debug.log');

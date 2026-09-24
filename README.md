@@ -1,8 +1,8 @@
 # img-comp
 
-适用于 ZTools 的本地图片压缩插件，离线压缩不依赖任何网络服务，页面设计借鉴 uTools 图片压缩
+适用于 ZTools 的本地图片压缩插件，基于 Vue 3、Vite、JavaScript 与 WebAssembly 实现，离线压缩不依赖任何网络服务，页面设计借鉴 uTools 图片压缩
 
-![软件界面](https://raw.githubusercontent.com/z-hanzhe/ztools-img-comp/refs/heads/main/assets/demo.png)
+![软件界面](https://raw.githubusercontent.com/z-hanzhe/ztools-img-comp/refs/heads/main/docs/images/demo.png)
 
 ## 支持格式
 
@@ -27,9 +27,9 @@
 
 ## 安装
 
-将 `dist/img-comp.zpx` 拖入 ZTools 的插件安装入口即可，或直接在 ZTools 插件市场搜索“图片压缩”安装。
+将 `dist/` 作为完整插件目录导入 ZTools 开发者工具，或等待官方 Action 将其打包后安装。
 
-执行 `npm run build` 后，`dist/` 是可直接导入的完整插件目录；官方插件仓库的 Action 会从该目录内容生成 ZIP 安装包。
+执行 `npm run build` 后，`dist/` 是可直接导入的完整插件目录；官方插件仓库的 Action 会从该目录内容创建 ZIP 安装包。
 
 ## 许可证
 
