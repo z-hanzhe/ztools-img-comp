@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { Settings as SettingsIcon } from 'lucide-vue-next'
+import { Check, Copy, Replace, Settings as SettingsIcon } from 'lucide-vue-next'
 import { computed, onBeforeUnmount, onMounted, ref } from 'vue'
 
 const emit = defineEmits<{
@@ -34,6 +34,8 @@ const activeIndex = ref(-1)
 const dropVisible = ref(false)
 const importing = ref(false)
 const failedThumbnails = ref(new Set<string>())
+const copiedEntries = ref(new Set<string>())
+const replacedEntries = ref(new Set<string>())
 
 const activeBatch = computed(() => {
   return activeIndex.value >= 0 && activeIndex.value < batches.value.length
@@ -90,6 +92,7 @@ function formatTime(value: number): string {
 
 /** 构造历史批次 tab 标题。 */
 function tabTitle(batch: ImageBatch): string {
+  if (batch.phase === 'scanning') return `扫描中 · ${batch.scan?.found || 0}张`
   return `${formatTime(batch.createdAt)} · ${batch.entries.length}张`
 }
 
@@ -244,15 +247,15 @@ async function startBatch(kind: string, payload: unknown, extraImages: string[] 
   const runtime = window.imgCompRuntime
   if (!runtime) return
 
-  const batch = await runtime.create({ kind, payload })
+  const refresh = (): void => {
+    batches.value = [...batches.value]
+  }
+  const batch = await runtime.create({ kind, payload }, refresh)
   if (extraImages.length > 0) await runtime.addDataUris(batch, extraImages)
-  if (batch.entries.length === 0) return
 
   batches.value.push(batch)
   activeIndex.value = batches.value.length - 1
-  void runtime.execute(batch, () => {
-    batches.value = [...batches.value]
-  }).then((completed) => {
+  void runtime.execute(batch, refresh).then((completed) => {
     batches.value = [...batches.value]
     if (completed.phase === 'complete' && !completed.cancelled) remember(completed)
   })
@@ -316,7 +319,7 @@ function closeBatch(index: number): void {
   const batch = batches.value[index]
   const runtime = window.imgCompRuntime
   if (batch && runtime) {
-    if (batch.phase === 'running' || batch.phase === 'pending') runtime.cancel(batch)
+    if (batch.phase === 'scanning' || batch.phase === 'running' || batch.phase === 'pending') runtime.cancel(batch)
     runtime.removeHistory?.(batch.historyId || batch.id)
   }
   batches.value.splice(index, 1)
@@ -332,10 +335,34 @@ function copyTargets(batch: ImageBatch): string[] {
     .filter((value): value is string => Boolean(value)))]
 }
 
-/** 复制单张图片。 */
+/** 取消扫描并关闭当前扫描标签页。 */
+function cancelScan(batch: ImageBatch): void {
+  window.imgCompRuntime?.cancel(batch)
+  const index = batches.value.indexOf(batch)
+  if (index >= 0) closeBatch(index)
+}
+
+/** 判断单项是否有可替换的压缩结果。 */
+function canReplace(entry: ImageEntry): boolean {
+  const batch = activeBatch.value
+  return batch?.phase === 'complete' && (replacedEntries.value.has(entry.id) ||
+    (!entry.error && !!entry.resultPath && entry.resultPath !== entry.inputPath &&
+      entry.resultBytes !== null && entry.resultBytes < entry.inputBytes))
+}
+
+/** 复制单张图片并记录完成状态。 */
 function copyOne(entry: ImageEntry): void {
   const target = entry.resultPath || entry.inputPath
-  if (target) window.imgCompRuntime?.copyOne(target)
+  if (!target) return
+  if (window.imgCompRuntime?.copyOne(target)) {
+    copiedEntries.value = new Set(copiedEntries.value).add(entry.id)
+  }
+}
+
+/** 替换单张图片并记录完成状态。 */
+async function replaceOne(batch: ImageBatch, entry: ImageEntry): Promise<void> {
+  const success = await window.imgCompRuntime?.replaceOne(batch, entry)
+  if (success) replacedEntries.value = new Set(replacedEntries.value).add(entry.id)
 }
 
 /** 复制整个批次的图片并在主窗口中隐藏插件。 */
@@ -347,7 +374,12 @@ async function copyAll(batch: ImageBatch): Promise<void> {
   getZ().showNotification?.(success
     ? `已复制 ${count} 张图片到剪贴板`
     : `批量复制失败，应复制 ${targets.length} 张图片`)
-  if (success) dismissMainWindow()
+  if (success) {
+    for (const entry of batch.entries) {
+      if (!entry.error) copiedEntries.value = new Set(copiedEntries.value).add(entry.id)
+    }
+    dismissMainWindow()
+  }
 }
 
 /** 取消当前批次。 */
@@ -357,9 +389,15 @@ function cancelBatch(batch: ImageBatch): void {
 
 /** 覆盖原图并在成功后隐藏主窗口。 */
 async function replaceInputs(batch: ImageBatch, count: number): Promise<void> {
+  const replaceableIds = batch.entries.filter(canReplace).map((entry) => entry.id)
   const success = await window.imgCompRuntime?.replaceInputs(batch)
   getZ().showNotification?.(success ? `已覆盖 ${count} 张` : '覆盖失败')
-  if (success) dismissMainWindow()
+  if (success) {
+    for (const entryId of replaceableIds) {
+      replacedEntries.value = new Set(replacedEntries.value).add(entryId)
+    }
+    dismissMainWindow()
+  }
 }
 
 /** 记录缩略图加载失败，显示占位图标。 */
@@ -432,7 +470,16 @@ onBeforeUnmount(unbindEvents)
         <div :style="{ width: `${activeBatch.progress.percent || 0}%` }"></div>
       </div>
 
-      <main class="main">
+      <main v-if="activeBatch.phase === 'scanning'" class="scan-main">
+        <div class="scan-spinner" aria-hidden="true"></div>
+        <strong>正在扫描图片文件</strong>
+        <div class="scan-progress">
+          已扫描出 {{ activeBatch.scan?.found || 0 }} 个图片文件，已检查 {{ activeBatch.scan?.scanned || 0 }} 个条目
+        </div>
+        <button class="btn danger" type="button" @click="cancelScan(activeBatch)">取消扫描</button>
+      </main>
+
+      <main v-else class="main">
         <div v-if="activeBatch.error" class="empty">
           <div class="big">⚠</div>
           <div>{{ activeBatch.error }}</div>
@@ -478,12 +525,31 @@ onBeforeUnmount(unbindEvents)
             >
               {{ entry.error ? '✕' : entry.savedPercent == null ? '' : entry.savedPercent === 0 ? '-0%' : `-${entry.savedPercent}%` }}
             </div>
-            <button class="copy" type="button" title="复制文件" @click="copyOne(entry)">⧉</button>
+            <button
+              v-if="canReplace(entry)"
+              class="row-action replace"
+              type="button"
+              :title="replacedEntries.has(entry.id) ? '已替换，点击可再次替换' : '替换原图'"
+              @click="replaceOne(activeBatch, entry)"
+            >
+              <Check v-if="replacedEntries.has(entry.id)" class="completed-icon" :size="15" :stroke-width="2.2" aria-hidden="true" />
+              <Replace v-else :size="15" :stroke-width="2" aria-hidden="true" />
+            </button>
+            <span v-else class="row-action-placeholder" aria-hidden="true"></span>
+            <button
+              class="row-action copy"
+              type="button"
+              :title="copiedEntries.has(entry.id) ? '已复制，点击可再次复制' : '复制文件'"
+              @click="copyOne(entry)"
+            >
+              <Check v-if="copiedEntries.has(entry.id)" class="completed-icon" :size="15" :stroke-width="2.2" aria-hidden="true" />
+              <Copy v-else :size="15" :stroke-width="2" aria-hidden="true" />
+            </button>
           </div>
         </div>
       </main>
 
-      <footer class="status">
+      <footer v-if="activeBatch.phase !== 'scanning'" class="status">
         <button class="settings-button" type="button" title="设置" @click="emit('openSettings')">
           <SettingsIcon :size="16" :stroke-width="2" aria-hidden="true" />
         </button>

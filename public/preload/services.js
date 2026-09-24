@@ -17,6 +17,7 @@ window.imgCompRuntime = Object.freeze({
   history: service.readHistory,
   removeHistory: service.removeHistory,
   replaceInputs: service.replaceInputs,
+  replaceOne: service.replaceOne,
   saveSettings: service.saveSettings,
   toHistory: service.toHistoryRecord,
   writeHistory: service.writeHistory

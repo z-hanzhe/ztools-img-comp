@@ -49,6 +49,7 @@ function loadRuntime(options = {}) {
 
 test('目录输入只创建一个批次并收集全部图片', async () => {
   const { service } = loadRuntime();
+  service.saveSettings({ recursiveFolders: true });
   const root = fs.mkdtempSync(path.join(os.tmpdir(), 'img-comp-batch-'));
   fs.mkdirSync(path.join(root, 'sub'));
   fs.writeFileSync(path.join(root, 'a.svg'), '<svg xmlns="http://www.w3.org/2000/svg"/>');
@@ -72,7 +73,7 @@ test('设置使用默认值并限制在允许范围内', () => {
   assert.deepEqual(service.getSettings(), {
     jpegQuality: 75,
     concurrency: 3,
-    recursiveFolders: true,
+    recursiveFolders: false,
     ignoredFolders: []
   });
   assert.deepEqual(service.saveSettings({
@@ -110,6 +111,44 @@ test('目录扫描遵循递归开关和忽略目录设置', async () => {
     path: root, name: path.basename(root), isDirectory: true, isFile: false
   }] });
   assert.deepEqual(filtered.entries.map(entry => entry.relativeName), [path.join('nested', 'nested.svg'), 'root.svg']);
+  fs.rmSync(root, { recursive: true, force: true });
+});
+
+test('目录扫描完成后才开始压缩并持续报告扫描进度', async () => {
+  const { service } = loadRuntime();
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), 'img-comp-scan-'));
+  fs.writeFileSync(path.join(root, 'a.svg'), '<svg xmlns="http://www.w3.org/2000/svg"/>');
+  const updates = [];
+  const batch = await service.createBatch({ kind: 'files', payload: [{
+    path: root, name: path.basename(root), isDirectory: true, isFile: false
+  }] }, value => updates.push({ phase: value.phase, found: value.scan.found }));
+  assert.equal(batch.phase, 'scanning');
+  assert.equal(batch.entries.length, 0);
+  await service.executeBatch(batch);
+  assert.equal(batch.phase, 'complete');
+  assert.equal(batch.entries.length, 1);
+  assert.ok(updates.some(update => update.found >= 1));
+  fs.rmSync(root, { recursive: true, force: true });
+});
+
+test('单条替换会写回输入文件但不影响同批其他结果', async () => {
+  const { service } = loadRuntime();
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), 'img-comp-replace-one-'));
+  const first = path.join(root, 'first.svg');
+  const second = path.join(root, 'second.svg');
+  fs.writeFileSync(first, '<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 10 10"><!-- first --><rect width="10" height="10" fill="#ff0000"/></svg>');
+  fs.writeFileSync(second, '<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 10 10"><!-- second --><rect width="10" height="10" fill="#0000ff"/></svg>');
+  const batch = await service.createBatch({ kind: 'files', payload: [
+    { path: first, name: 'first.svg', isFile: true },
+    { path: second, name: 'second.svg', isFile: true }
+  ] });
+  await service.executeBatch(batch);
+  const firstEntry = batch.entries.find(entry => entry.inputPath === first);
+  const secondEntry = batch.entries.find(entry => entry.inputPath === second);
+  assert.equal(await service.replaceOne(batch, firstEntry), true);
+  assert.equal(firstEntry.resultPath, first);
+  assert.notEqual(secondEntry.resultPath, second);
+  assert.match(fs.readFileSync(first, 'utf8'), /fill="red"/);
   fs.rmSync(root, { recursive: true, force: true });
 });
 

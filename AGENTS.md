@@ -30,6 +30,8 @@ ZTools 本地图片压缩插件，支持 JPG、PNG、GIF、SVG，基于 JavaScri
 ```text
 batch
   id, kind, createdAt, phase, rootPath
+  scan
+    scanned, found
   entries[]
     inputPath, inputBytes, filename, relativeName
     outputName, resultPath, resultBytes, savedPercent, error
@@ -43,7 +45,9 @@ batch
 
 - 压缩结果没有比原文件小时，保留原文件作为结果，绝不用更大的文件替换。
 - 批次进入方式由 `public/plugin.json` 的 cmds 声明（关键词、files、img、window 四类），`src/ImageCompressor/index.vue` 的插件进入回调统一分发；window 进入依赖宿主 `ztools.readCurrentFolderPath()`。
-- 设置通过 `dbStorage` 持久化，默认 JPEG 质量为 75、并发线程数为 3、递归压缩子文件夹开启；用户可配置递归时忽略的目录名称。
+- 文件夹扫描在批次创建后后台执行，扫描阶段持续报告条目和图片数量并支持取消；取消后关闭当前标签页。
+- 列表中的单项替换和复制不隐藏窗口，只有底部批量操作按原有窗口策略处理。
+- 设置通过 `dbStorage` 持久化，默认 JPEG 质量为 75、并发线程数为 3、递归压缩子文件夹禁用；用户可配置递归时忽略的目录名称。
 
 ## 发布边界
 

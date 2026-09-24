@@ -9,7 +9,7 @@ const emit = defineEmits<{
 const DEFAULT_SETTINGS: ImageSettings = {
   jpegQuality: 75,
   concurrency: 3,
-  recursiveFolders: true,
+  recursiveFolders: false,
   ignoredFolders: []
 }
 
@@ -39,7 +39,7 @@ function loadSettings(): void {
   const saved = window.imgCompRuntime?.getSettings?.() || DEFAULT_SETTINGS
   form.jpegQuality = clamp(saved.jpegQuality, 1, 100)
   form.concurrency = clamp(saved.concurrency, 1, 10)
-  form.recursiveFolders = saved.recursiveFolders !== false
+  form.recursiveFolders = saved.recursiveFolders === true
   ignoredFoldersText.value = saved.ignoredFolders.join('\n')
   ready = true
 }
@@ -82,7 +82,6 @@ onMounted(loadSettings)
         <div class="settings-item">
           <div class="settings-item-header">
             <label for="jpeg-quality">JPEG 压缩率</label>
-            <output for="jpeg-quality">{{ form.jpegQuality }}</output>
           </div>
           <div class="settings-range-row">
             <input
@@ -112,7 +111,6 @@ onMounted(loadSettings)
         <div class="settings-item">
           <div class="settings-item-header">
             <label for="concurrency">并发线程数</label>
-            <output for="concurrency">{{ form.concurrency }}</output>
           </div>
           <div class="settings-range-row">
             <input
@@ -156,7 +154,7 @@ onMounted(loadSettings)
             id="ignored-folders"
             v-model="ignoredFoldersText"
             class="settings-textarea"
-            rows="4"
+            rows="3"
             :disabled="!form.recursiveFolders"
             placeholder="每行一个目录名称，也可以使用逗号分隔"
           ></textarea>
