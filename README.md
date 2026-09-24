@@ -4,6 +4,8 @@
 
 ![软件界面](https://raw.githubusercontent.com/z-hanzhe/ztools-img-comp/refs/heads/main/docs/images/demo.png)
 
+![设置页面](https://raw.githubusercontent.com/z-hanzhe/ztools-img-comp/refs/heads/main/docs/images/settings.png)
+
 ## 支持格式
 
 - **JPEG**：使用 `@jsquash/jpeg` 的 MozJPEG WebAssembly 编码器重新编码，默认质量 75，可在设置中调整为 1-100。
