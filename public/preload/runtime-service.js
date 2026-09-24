@@ -12,13 +12,87 @@ const PLUGIN_VERSION = require('../plugin.json').version;
 const WORKSPACE = path.join(os.tmpdir(), 'ztools.image.compression');
 const DEBUG_LOG_PATH = path.join(WORKSPACE, 'compression-debug.log');
 const HISTORY_KEY = 'history-v3';
+const SETTINGS_KEY = 'settings-v1';
+const DEFAULT_SETTINGS = Object.freeze({
+  jpegQuality: 75,
+  concurrency: 3,
+  recursiveFolders: true,
+  ignoredFolders: []
+});
 const HISTORY_LIMIT = 8;
 const STALE_AFTER = 24 * 60 * 60 * 1000;
 const SUPPORTED_EXTENSIONS = new Set(['.jpg', '.jpeg', '.png', '.gif', '.svg']);
 const COMPRESSION_WORKER_PATH = path.join(__dirname, 'compression-worker.js');
-const MAX_COMPRESSION_EXECUTORS = 4;
+const MAX_COMPRESSION_EXECUTORS = 10;
 const ACTIVE_COMPRESSION_EXECUTORS = new WeakMap();
 
+/**
+ * 规范化文件夹忽略名称。
+ * @param {unknown} value 原始忽略目录
+ * @returns {string[]} 规范化后的目录名称
+ */
+function normaliseIgnoredFolders(value) {
+  const values = Array.isArray(value)
+    ? value
+    : typeof value === 'string' ? value.split(/[\n,]+/) : [];
+  return [...new Set(values
+    .map(item => String(item || '').trim())
+    .filter(Boolean))].slice(0, 100);
+}
+
+/**
+ * 规范化插件设置。
+ * @param {unknown} value 原始设置
+ * @returns {{jpegQuality:number,concurrency:number,recursiveFolders:boolean,ignoredFolders:string[]}} 规范化设置
+ */
+function normaliseSettings(value) {
+  let source = value;
+  if (typeof source === 'string') {
+    try { source = JSON.parse(source); } catch { source = {}; }
+  }
+  if (!source || typeof source !== 'object') source = {};
+  const quality = Number(source.jpegQuality);
+  const concurrency = Number(source.concurrency);
+  return {
+    jpegQuality: Number.isFinite(quality) ? Math.min(100, Math.max(1, Math.round(quality))) : DEFAULT_SETTINGS.jpegQuality,
+    concurrency: Number.isFinite(concurrency) ? Math.min(MAX_COMPRESSION_EXECUTORS, Math.max(1, Math.round(concurrency))) : DEFAULT_SETTINGS.concurrency,
+    recursiveFolders: source.recursiveFolders !== false,
+    ignoredFolders: normaliseIgnoredFolders(source.ignoredFolders)
+  };
+}
+
+/**
+ * 读取插件设置。
+ * @returns {{jpegQuality:number,concurrency:number,recursiveFolders:boolean,ignoredFolders:string[]}} 当前设置
+ */
+function readSettings() {
+  try {
+    const storage = globalThis.window?.ztools?.dbStorage;
+    if (!storage || typeof storage.getItem !== 'function') return normaliseSettings(DEFAULT_SETTINGS);
+    return normaliseSettings(storage.getItem(SETTINGS_KEY));
+  } catch (error) {
+    console.error('[img-comp] 读取插件设置失败:', error);
+    return normaliseSettings(DEFAULT_SETTINGS);
+  }
+}
+
+/**
+ * 保存插件设置。
+ * @param {unknown} value 待保存设置
+ * @returns {{jpegQuality:number,concurrency:number,recursiveFolders:boolean,ignoredFolders:string[]}} 已保存设置
+ */
+function writeSettings(value) {
+  const settings = normaliseSettings(value);
+  try {
+    const storage = globalThis.window?.ztools?.dbStorage;
+    if (storage && typeof storage.setItem === 'function') {
+      storage.setItem(SETTINGS_KEY, JSON.stringify(settings));
+    }
+  } catch (error) {
+    console.error('[img-comp] 保存插件设置失败:', error);
+  }
+  return settings;
+}
 /**
  * 创建唯一的批次标识。
  * @param {string} prefix 标识前缀
@@ -275,10 +349,12 @@ async function inspectFile(filePath, fallbackName) {
 /**
  * 递归收集目录中的图片。
  * @param {string} basePath 根目录
+ * @param {{recursiveFolders:boolean,ignoredFolders:string[]}} settings 目录扫描设置
  * @returns {Promise<Array<object>>} 输入项
  */
-async function collectDirectory(basePath) {
+async function collectDirectory(basePath, settings) {
   const result = [];
+  const ignoredFolders = new Set(settings.ignoredFolders.map(name => name.toLocaleLowerCase()));
   async function visit(currentPath) {
     let entries;
     try { entries = await fsp.readdir(currentPath, { withFileTypes: true }); } catch { return; }
@@ -286,8 +362,11 @@ async function collectDirectory(basePath) {
     for (const entry of entries) {
       const fullPath = path.join(currentPath, entry.name);
       if (entry.isDirectory()) {
-        if (entry.name.startsWith('.') || entry.name === 'node_modules' || entry.name.endsWith('.asar')) continue;
-        await visit(fullPath);
+        const folderName = entry.name.toLocaleLowerCase();
+        const builtInIgnored = entry.name.startsWith('.') || entry.name === 'node_modules' || entry.name.endsWith('.asar');
+        if (settings.recursiveFolders && !builtInIgnored && !ignoredFolders.has(folderName)) {
+          await visit(fullPath);
+        }
       } else if (entry.isFile()) {
         const item = await inspectFile(fullPath);
         if (item) item.relativeName = path.relative(basePath, fullPath) || item.filename;
@@ -355,6 +434,7 @@ async function attachDataUris(batch, dataUris) {
  */
 async function createBatch(request = {}) {
   await prepareWorkspace();
+  const settings = readSettings();
   const batch = createBatchState(request.kind || 'files');
   if (request.kind === 'clipboard') {
     await attachDataUris(batch, Array.isArray(request.payload) ? request.payload : [request.payload]);
@@ -364,7 +444,7 @@ async function createBatch(request = {}) {
     const files = descriptors.filter(item => item && item.isFile && item.path);
     for (const descriptor of directories) {
       const root = path.resolve(descriptor.path);
-      const entries = await collectDirectory(root);
+      const entries = await collectDirectory(root, settings);
       if (!batch.rootPath && directories.length === 1) batch.rootPath = root;
       batch.entries.push(...entries);
     }
@@ -403,22 +483,18 @@ function resultPathFor(batch, entry) {
 }
 
 /**
- * 根据机器并行度和任务数量计算并行执行器数量。
+ * 根据机器并行度和设置计算并行执行器数量。
  * @param {object[]} entries 待处理图片
+ * @param {{concurrency:number}} settings 并发设置
  * @returns {number} 并行执行器数量
  */
-function compressionExecutorCount(entries) {
+function compressionExecutorCount(entries, settings) {
   if (entries.length === 0) return 0;
   const parallelism = typeof os.availableParallelism === 'function'
     ? os.availableParallelism()
     : os.cpus().length;
-  const largestInputBytes = entries.reduce((largest, entry) => {
-    return Math.max(largest, Number(entry.inputBytes) || 0);
-  }, 0);
-  const sizeLimit = largestInputBytes >= 32 * 1024 * 1024
-    ? 2
-    : largestInputBytes >= 16 * 1024 * 1024 ? 3 : MAX_COMPRESSION_EXECUTORS;
-  return Math.min(entries.length, sizeLimit, Math.max(1, parallelism - 1));
+  const configuredCount = Math.min(MAX_COMPRESSION_EXECUTORS, Math.max(1, settings.concurrency));
+  return Math.min(entries.length, configuredCount, Math.max(1, parallelism - 1));
 }
 
 /**
@@ -612,9 +688,10 @@ function runCompressionFallback(state, batch, task) {
  * @param {{nextIndex:number,entries:object[],fallbackTail:Promise<void>}} state 共享任务状态
  * @param {{id:number,mode:string,run:(task:object)=>Promise<object>,close:()=>Promise<unknown>}|null} client 压缩执行器
  * @param {(batch:object)=>void} onChange 状态回调
+ * @param {{jpegQuality:number}} settings 压缩设置
  * @returns {Promise<void>} 完成信号
  */
-async function runCompressionLane(batch, state, client, onChange) {
+async function runCompressionLane(batch, state, client, onChange, settings) {
   let executorAvailable = !!client;
   while (!batch.cancelled) {
     const index = state.nextIndex++;
@@ -624,7 +701,8 @@ async function runCompressionLane(batch, state, client, onChange) {
       id: makeId('task'),
       inputPath: entry.inputPath,
       filename: entry.filename,
-      resultPath: resultPathFor(batch, entry)
+      resultPath: resultPathFor(batch, entry),
+      jpegQuality: settings.jpegQuality
     };
     const executorId = client ? client.id : 0;
     const executorMode = client ? client.mode : 'main-thread';
@@ -688,10 +766,13 @@ async function runCompressionLane(batch, state, client, onChange) {
  * @returns {Promise<void>} 完成信号
  */
 async function executeCompressionPool(batch, onChange) {
-  const executorCount = compressionExecutorCount(batch.entries);
+  const settings = readSettings();
+  const executorCount = compressionExecutorCount(batch.entries, settings);
   await appendCompressionDebugLog('执行器池配置', {
     batchId: batch.id,
     requestedExecutors: executorCount,
+    configuredConcurrency: settings.concurrency,
+    jpegQuality: settings.jpegQuality,
     maxInputBytes: batch.entries.reduce((largest, entry) => {
       return Math.max(largest, Number(entry.inputBytes) || 0);
     }, 0)
@@ -742,7 +823,7 @@ async function executeCompressionPool(batch, onChange) {
   };
   ACTIVE_COMPRESSION_EXECUTORS.set(batch, clients);
   try {
-    await Promise.all(lanes.map(client => runCompressionLane(batch, state, client, onChange)));
+    await Promise.all(lanes.map(client => runCompressionLane(batch, state, client, onChange, settings)));
   } finally {
     ACTIVE_COMPRESSION_EXECUTORS.delete(batch);
     await Promise.allSettled(clients.map(client => client.close()));
@@ -952,9 +1033,11 @@ module.exports = {
   executeBatch,
   formatBytes,
   fromHistoryRecord,
+  getSettings: readSettings,
   readHistory,
   removeHistory,
   replaceInputs,
+  saveSettings: writeSettings,
   toHistoryRecord,
   writeHistory
 };

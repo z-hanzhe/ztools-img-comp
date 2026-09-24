@@ -15,7 +15,7 @@ ZTools 本地图片压缩插件，支持 JPG、PNG、GIF、SVG，基于 JavaScri
 
 调整目录结构或模块职责时，必须同步更新本节：
 
-1. `src/ImageCompressor/index.vue` 仅负责渲染界面和用户交互，不直接访问 Node.js 文件系统。
+1. `src/` 负责 Vue 前端界面和用户交互，其中 `ImageCompressor` 负责压缩主界面，`Settings` 负责设置页面；前端不得直接访问 Node.js 文件系统。
 2. `public/preload/compression-engine.js` 仅负责格式识别和 JPEG、PNG、GIF、SVG 编解码。
 3. `public/preload/compression-worker.js` 负责在线程或独立 Node 子进程中读取、压缩并写入单张图片。
 4. `public/preload/runtime-service.js` 负责并行执行器池、批次生命周期、文件扫描、临时结果、历史记录和剪贴板。
@@ -43,7 +43,7 @@ batch
 
 - 压缩结果没有比原文件小时，保留原文件作为结果，绝不用更大的文件替换。
 - 批次进入方式由 `public/plugin.json` 的 cmds 声明（关键词、files、img、window 四类），`src/ImageCompressor/index.vue` 的插件进入回调统一分发；window 进入依赖宿主 `ztools.readCurrentFolderPath()`。
-- 历史记录只保存路径与统计（上限 8 条），不保存图片内容；临时结果超过 24 小时在插件启动时清理。
+- 设置通过 `dbStorage` 持久化，默认 JPEG 质量为 75、并发线程数为 3、递归压缩子文件夹开启；用户可配置递归时忽略的目录名称。
 
 ## 发布边界
 

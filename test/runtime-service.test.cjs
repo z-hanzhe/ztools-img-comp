@@ -67,6 +67,52 @@ test('目录输入只创建一个批次并收集全部图片', async () => {
   fs.rmSync(root, { recursive: true, force: true });
 });
 
+test('设置使用默认值并限制在允许范围内', () => {
+  const { service } = loadRuntime();
+  assert.deepEqual(service.getSettings(), {
+    jpegQuality: 75,
+    concurrency: 3,
+    recursiveFolders: true,
+    ignoredFolders: []
+  });
+  assert.deepEqual(service.saveSettings({
+    jpegQuality: 120,
+    concurrency: 0,
+    recursiveFolders: false,
+    ignoredFolders: [' cache ', 'cache', '']
+  }), {
+    jpegQuality: 100,
+    concurrency: 1,
+    recursiveFolders: false,
+    ignoredFolders: ['cache']
+  });
+});
+
+test('目录扫描遵循递归开关和忽略目录设置', async () => {
+  const { service } = loadRuntime();
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), 'img-comp-settings-'));
+  const nested = path.join(root, 'nested');
+  const ignored = path.join(root, 'skip-me');
+  fs.mkdirSync(nested);
+  fs.mkdirSync(ignored);
+  fs.writeFileSync(path.join(root, 'root.svg'), '<svg xmlns="http://www.w3.org/2000/svg"/>');
+  fs.writeFileSync(path.join(nested, 'nested.svg'), '<svg xmlns="http://www.w3.org/2000/svg"/>');
+  fs.writeFileSync(path.join(ignored, 'ignored.svg'), '<svg xmlns="http://www.w3.org/2000/svg"/>');
+
+  service.saveSettings({ recursiveFolders: false });
+  const shallow = await service.createBatch({ kind: 'files', payload: [{
+    path: root, name: path.basename(root), isDirectory: true, isFile: false
+  }] });
+  assert.deepEqual(shallow.entries.map(entry => entry.filename), ['root.svg']);
+
+  service.saveSettings({ recursiveFolders: true, ignoredFolders: ['skip-me'] });
+  const filtered = await service.createBatch({ kind: 'files', payload: [{
+    path: root, name: path.basename(root), isDirectory: true, isFile: false
+  }] });
+  assert.deepEqual(filtered.entries.map(entry => entry.relativeName), [path.join('nested', 'nested.svg'), 'root.svg']);
+  fs.rmSync(root, { recursive: true, force: true });
+});
+
 test('同一批剪贴板图片会合并为一个批次', async () => {
   const { service } = loadRuntime();
   const png = 'data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mNk+A8AAQUBAScY42YAAAAASUVORK5CYII=';
@@ -148,9 +194,9 @@ test('工作线程被宿主禁用时会改用多个压缩子进程', async () =>
   const poolRecord = records.find(record => record.event === '执行器池已创建');
   const completed = records.filter(record => record.event === '任务完成');
   assert.deepEqual(poolRecord.modes, [
-    'child-process', 'child-process', 'child-process', 'child-process'
+    'child-process', 'child-process', 'child-process'
   ]);
-  assert.equal(new Set(completed.map(record => record.processId)).size, 4);
+  assert.equal(new Set(completed.map(record => record.processId)).size, 3);
   assert.equal(batch.progress.succeeded, 4);
   assert.equal(batch.progress.failed, 0);
   fs.rmSync(root, { recursive: true, force: true });

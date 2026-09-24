@@ -39,6 +39,13 @@ declare global {
     }
   }
 
+  type ImageSettings = {
+    jpegQuality: number
+    concurrency: number
+    recursiveFolders: boolean
+    ignoredFolders: string[]
+  }
+
   type ImageRuntime = {
     addDataUris: (batch: ImageBatch, dataUris: string[]) => Promise<ImageBatch>
     cancel: (batch: ImageBatch) => ImageBatch
@@ -48,9 +55,11 @@ declare global {
     execute: (batch: ImageBatch, onChange?: (batch: ImageBatch) => void) => Promise<ImageBatch>
     formatBytes: (bytes: number) => string
     fromHistory: (record: unknown) => ImageBatch
+    getSettings: () => ImageSettings
     history: () => unknown[]
     removeHistory: (id: string) => boolean
     replaceInputs: (batch: ImageBatch) => Promise<boolean>
+    saveSettings: (settings: ImageSettings) => ImageSettings
     toHistory: (batch: ImageBatch) => unknown
     writeHistory: (records: unknown[]) => boolean
   }

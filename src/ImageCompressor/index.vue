@@ -1,5 +1,10 @@
 <script setup lang="ts">
+import { Settings as SettingsIcon } from 'lucide-vue-next'
 import { computed, onBeforeUnmount, onMounted, ref } from 'vue'
+
+const emit = defineEmits<{
+  openSettings: []
+}>()
 
 interface FileDescriptor {
   isDirectory: boolean
@@ -479,6 +484,9 @@ onBeforeUnmount(unbindEvents)
       </main>
 
       <footer class="status">
+        <button class="settings-button" type="button" title="设置" @click="emit('openSettings')">
+          <SettingsIcon :size="16" :stroke-width="2" aria-hidden="true" />
+        </button>
         <div class="left">
           完成 <b>{{ activeBatch.progress.percent || 0 }}%</b>
           成功 <b>{{ activeBatch.progress.succeeded }}</b>
@@ -522,6 +530,16 @@ onBeforeUnmount(unbindEvents)
       <div class="big">🖼</div>
       <div>将图片或文件夹拖到这里，也可以直接粘贴截图</div>
     </div>
+
+    <button
+      v-if="!activeBatch"
+      class="settings-button settings-button-floating"
+      type="button"
+      title="设置"
+      @click="emit('openSettings')"
+    >
+      <SettingsIcon :size="16" :stroke-width="2" aria-hidden="true" />
+    </button>
 
     <div v-if="dropVisible" class="drop-overlay">松开以导入文件</div>
   </div>
